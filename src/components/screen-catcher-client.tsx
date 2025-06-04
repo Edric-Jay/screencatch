@@ -11,7 +11,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { useToast } from "@/hooks/use-toast";
 import { AudioWaveform, Mic, Clapperboard, Video, StopCircle, Download, AlertTriangle, TimerIcon, CheckCircle2, Save, RefreshCwIcon } from 'lucide-react';
 
-type RecordingStatus = "idle" | "permission_pending" | "countdown" | "recording" | "stopped" | "error" | "replay_buffering" | "replay_saving";
+type RecordingStatus = "idle" | "permission_pending" | "countdown" | "recording" | "stopped" | "error" | "replay_buffering";
 
 const REGULAR_RECORDING_DURATIONS = [
   { label: "Manual Stop (Unlimited)", value: 0 },
@@ -79,17 +79,6 @@ export default function ScreenCatcherClient() {
     setCountdown(null);
   }, []);
 
-  useEffect(() => {
-    return () => {
-      cleanupStream();
-      cleanupRecorder();
-      cleanupTimers();
-      if (recordedVideoUrl) URL.revokeObjectURL(recordedVideoUrl);
-      replayBufferChunksRef.current = [];
-    };
-  }, [cleanupStream, cleanupRecorder, cleanupTimers, recordedVideoUrl]);
-
-
   const handleStopRecording = useCallback(() => {
     if (mediaRecorderRef.current && (mediaRecorderRef.current.state === "recording" || mediaRecorderRef.current.state === "paused")) {
       mediaRecorderRef.current.stop();
@@ -99,11 +88,12 @@ export default function ScreenCatcherClient() {
 
   const stopInstantReplayBuffering = useCallback((showToast = true) => {
     if (mediaRecorderRef.current && (mediaRecorderRef.current.state === "recording" || mediaRecorderRef.current.state === "paused")) {
-        mediaRecorderRef.current.stop(); // This will trigger its onstop, which calls cleanupStream
+        mediaRecorderRef.current.stop();
     } else {
-        cleanupStream(); // Explicitly cleanup if recorder wasn't active or didn't exist
+        cleanupStream();
         replayBufferChunksRef.current = [];
     }
+
     if (status !== "idle") {
       setStatus("idle");
     }
@@ -112,25 +102,16 @@ export default function ScreenCatcherClient() {
     }
   }, [status, toast, cleanupStream, setStatus]);
 
-
-  // Not using useCallback here to ensure it captures the latest state/refs in its closure
-  // This function is assigned to streamRef.current.getVideoTracks()[0].onended
   function handleStreamStopFromBrowser() {
+    console.log("Stream stopped from browser UI. Current status:", status);
     if (status === "recording" || status === "countdown") {
-      console.log("Screen sharing stopped by user (regular recording).");
-      handleStopRecording(); // handleStopRecording is stable due to useCallback
+      handleStopRecording();
     } else if (status === "replay_buffering") {
-      console.log("Screen sharing stopped by user (replay buffering).");
-      stopInstantReplayBuffering(false); // stopInstantReplayBuffering is stable
-      setEnableInstantReplay(false); // Direct state update
-      // No explicit toast here if stopInstantReplayBuffering(false) is used.
-      // A toast might be desired if user explicitly stops sharing via browser UI
-      if (status !== "idle") { // Check if status was not already idle to avoid redundant toasts
-         toast({ title: "Instant Replay Stopped", description: "Screen sharing was ended.", variant: "default" });
-      }
+      setEnableInstantReplay(false);
+      stopInstantReplayBuffering(false);
+      toast({ title: "Instant Replay Stopped", description: "Screen sharing was ended.", variant: "default" });
     }
   };
-
 
   const startRecordingSharedLogic = async (forReplay: boolean): Promise<boolean> => {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
@@ -168,9 +149,7 @@ export default function ScreenCatcherClient() {
       }
 
       streamRef.current = finalStream;
-      // Assign the regular function, not a useCallback version here for simplicity and to avoid re-hooking.
       finalStream.getVideoTracks()[0].onended = handleStreamStopFromBrowser;
-
 
       const options = { mimeType: 'video/webm; codecs=vp9' };
       try {
@@ -214,11 +193,10 @@ export default function ScreenCatcherClient() {
     };
 
     mediaRecorderRef.current.onstop = () => {
-      if (recordedChunksRef.current.length === 0 && status !== "idle") { // Ensure not to process if already idle (e.g. from user stop)
+      if (recordedChunksRef.current.length === 0 && status !== "idle") {
         setStatus("idle");
         cleanupStream();
         cleanupTimers();
-        console.log("Recording stopped with no data (regular).");
         return;
       }
       if (recordedChunksRef.current.length > 0) {
@@ -227,13 +205,13 @@ export default function ScreenCatcherClient() {
         setRecordedVideoUrl(url);
         toast({ title: "Recording Finished", description: "Your video is ready for download.", icon: <CheckCircle2 className="h-5 w-5 text-green-500" /> });
       }
-      setStatus("stopped"); // Transition to stopped even if no chunks, to show video player or message
+      setStatus("stopped");
       cleanupStream();
       cleanupTimers();
       recordedChunksRef.current = [];
     };
 
-    mediaRecorderRef.current.start(); // Continuous recording for regular mode
+    mediaRecorderRef.current.start();
 
     if (regularRecordingDurationSeconds > 0) {
       setStatus("countdown");
@@ -252,24 +230,21 @@ export default function ScreenCatcherClient() {
     toast({ title: "Regular Recording Started", icon: <Video className="h-5 w-5 text-red-500" /> });
   };
 
-
-  // --- Instant Replay Logic ---
-  const startInstantReplayBuffering = async () => {
+  const startInstantReplayBuffering = useCallback(async () => {
     if (status === "recording" || status === "countdown") {
         toast({title: "Action disabled", description: "Stop regular recording to enable Instant Replay.", variant: "default"});
         setEnableInstantReplay(false);
         return;
     }
-    const success = await startRecordingSharedLogic(true);
+    const success = await startRecordingSharedLogic(true); // forReplay = true
     if (!success || !mediaRecorderRef.current) {
-        setEnableInstantReplay(false);
+        setEnableInstantReplay(false); // Ensure toggle is off if start failed
         return;
     }
 
     mediaRecorderRef.current.ondataavailable = (event: BlobEvent) => {
         if (event.data.size > 0) {
             replayBufferChunksRef.current.push(event.data);
-            // Use the ref for currentBufferDurationTarget to get the latest value
             const currentBufferDurationTarget = instantReplayBufferDurationRef.current;
             const maxChunks = Math.ceil(currentBufferDurationTarget / REPLAY_CHUNK_DURATION_SECONDS);
             while (replayBufferChunksRef.current.length > maxChunks) {
@@ -279,28 +254,51 @@ export default function ScreenCatcherClient() {
     };
 
     mediaRecorderRef.current.onstop = () => {
-        cleanupStream(); // Always clean up the stream when the recorder stops
-        if (status === "replay_buffering") { // Only change status if it was actively buffering
-          setStatus("idle");
-          // If onstop was called NOT due to saving, but e.g. stream ended, clear chunks
-          if(status !== "replay_saving") replayBufferChunksRef.current = [];
+        cleanupStream();
+        // If the recorder stops for any reason (user toggle, stream end, error),
+        // and we were in a replay-related state, reset to idle and clear buffer.
+        if (status === "replay_buffering" || status === "permission_pending") {
+            setStatus("idle");
         }
-        // If it stopped while 'replay_saving', handleSaveLastClip will set the next status
+        replayBufferChunksRef.current = []; // Always clear buffer when replay recorder stops
     };
 
     mediaRecorderRef.current.onerror = (event) => {
         console.error("MediaRecorder error (replay):", event);
         setErrorMessage("An error occurred with the replay buffer.");
-        setStatus("error");
-        stopInstantReplayBuffering(true);
-        setEnableInstantReplay(false);
+        setStatus("error"); // Transition to error state
+        setEnableInstantReplay(false); // Turn off the toggle
+        stopInstantReplayBuffering(true); // Attempt to stop and show toast
     };
 
-    mediaRecorderRef.current.start(REPLAY_CHUNK_DURATION_MS); // Collect data in 5-second chunks
+    mediaRecorderRef.current.start(REPLAY_CHUNK_DURATION_MS);
     setStatus("replay_buffering");
     toast({ title: "Instant Replay Active", description: `Buffering up to ${instantReplayBufferDurationRef.current / 60} min.`, icon: <RefreshCwIcon className="h-5 w-5 text-blue-500" /> });
-  };
+  }, [status, includeSystemAudio, includeMicAudio, toast, setEnableInstantReplay, setErrorMessage, cleanupStream, handleStreamStopFromBrowser, stopInstantReplayBuffering, setStatus]);
 
+
+  useEffect(() => {
+    // This effect handles restarting replay buffering if duration changes while active.
+    if (enableInstantReplay && status === "replay_buffering") {
+      // Using a variable to track if this specific effect instance initiated a stop/start cycle
+      // to prevent potential rapid toggling if dependencies update too quickly.
+      // This is primarily for the instantReplayBufferDuration change.
+      console.log("Instant Replay duration changed while active. Restarting buffer with new duration.");
+      // Stop current buffering (quietly)
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+        mediaRecorderRef.current.onstop = null; // Temporarily disable onstop to avoid race with setStatus('idle')
+        mediaRecorderRef.current.stop();
+      }
+      cleanupStream(); // Ensure old stream is gone
+      replayBufferChunksRef.current = []; // Clear old chunks
+
+      // Restart buffering with new duration after a brief delay to allow state to settle
+      const restartTimer = setTimeout(() => {
+        startInstantReplayBuffering();
+      }, 100); // Small delay
+      return () => clearTimeout(restartTimer);
+    }
+  }, [instantReplayBufferDuration]); // Only re-run if the duration value itself changes
 
   const handleToggleInstantReplay = (checked: boolean) => {
     setEnableInstantReplay(checked);
@@ -316,21 +314,13 @@ export default function ScreenCatcherClient() {
         toast({ title: "Buffer Empty", description: "No replay data buffered yet.", variant: "default" });
         return;
     }
-    setStatus("replay_saving");
 
-    // This is the duration selected in the UI for the clip (e.g., "Save Last 1 Minute")
-    const desiredClipDurationSeconds = instantReplayBufferDurationRef.current;
-    // Calculate how many of our 5-second chunks make up this desired duration
-    const numberOfChunksToSave = Math.max(1, Math.ceil(desiredClipDurationSeconds / REPLAY_CHUNK_DURATION_SECONDS));
-    
-    // Slice the replayBufferChunksRef to get only the most recent chunks for the desired clip duration
-    const chunksForClip = replayBufferChunksRef.current.slice(-numberOfChunksToSave);
+    // The buffer should already be trimmed to the correct size by ondataavailable
+    // and the restart logic in the useEffect for duration changes.
+    const chunksForClip = [...replayBufferChunksRef.current];
 
     if (chunksForClip.length === 0) {
-        // This case should ideally not be hit if replayBufferChunksRef.current.length > 0 check passed,
-        // but as a safeguard.
-        toast({ title: "Buffer Incomplete", description: "Not enough data for the selected duration. Try a shorter clip or wait longer.", variant: "default" });
-        setStatus(enableInstantReplay ? "replay_buffering" : "idle"); // Revert status
+        toast({ title: "Buffer Incomplete", description: "Not enough data to save.", variant: "default" });
         return;
     }
 
@@ -343,42 +333,22 @@ export default function ScreenCatcherClient() {
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    // It's good practice to revoke the object URL after a short delay or when it's no longer needed
-    // For downloads, revoking immediately can sometimes cause issues in some browsers.
     setTimeout(() => URL.revokeObjectURL(url), 100);
 
-
-    toast({ title: "Replay Saved!", description: `Last clip (up to ${desiredClipDurationSeconds / 60} min) saved.`, icon: <Download className="h-5 w-5 text-green-500" /> });
-    
-    // After saving, decide next state
-    if (enableInstantReplay) {
-        // If replay is still enabled and stream is active, it should ideally continue buffering.
-        // The mediaRecorder might have stopped if its ondataavailable was too slow or if saving somehow interrupted it.
-        // We also need to consider if the stream itself is still active.
-        if (streamRef.current && streamRef.current.active && mediaRecorderRef.current && mediaRecorderRef.current.state === 'inactive') {
-            // If recorder is inactive but stream is fine, and replay is enabled, restart buffering.
-            // This covers the case where saving might have stopped the recorder.
-            // To be safe, we'll clear old chunks and restart.
-            replayBufferChunksRef.current = [];
-            mediaRecorderRef.current.start(REPLAY_CHUNK_DURATION_MS);
-            setStatus("replay_buffering");
-        } else if (streamRef.current && streamRef.current.active) {
-            // If recorder is already active (e.g. ondataavailable continued), just set status.
-             setStatus("replay_buffering");
-        } else {
-            // Stream might have been stopped by user action during save or other reasons.
-            setEnableInstantReplay(false); // Turn off toggle if stream died
-            setStatus("idle");
-            stopInstantReplayBuffering(false); // Ensure full cleanup if stream died
-            toast({ title: "Instant Replay Deactivated", description: "Screen sharing ended.", icon: <RefreshCwIcon className="h-5 w-5" /> });
-        }
-    } else {
-        setStatus("idle");
-        // If instant replay was disabled before/during saving, ensure buffer is cleared.
-        replayBufferChunksRef.current = [];
-        stopInstantReplayBuffering(false); // Full cleanup
-    }
+    toast({ title: "Replay Saved!", description: `Last clip (up to ${instantReplayBufferDurationRef.current / 60} min) saved.`, icon: <Download className="h-5 w-5 text-green-500" /> });
+    // No status change here, replay continues buffering if still enabled.
   };
+  
+  useEffect(() => {
+    return () => {
+      cleanupStream();
+      cleanupRecorder();
+      cleanupTimers();
+      if (recordedVideoUrl) URL.revokeObjectURL(recordedVideoUrl);
+      replayBufferChunksRef.current = []; // Ensure replay buffer is cleared on unmount
+    };
+  }, [cleanupStream, cleanupRecorder, cleanupTimers, recordedVideoUrl]);
+
 
   const formatTime = (totalSeconds: number | null) => {
     if (totalSeconds === null) return "00:00";
@@ -422,7 +392,7 @@ export default function ScreenCatcherClient() {
               id="system-audio"
               checked={includeSystemAudio}
               onCheckedChange={setIncludeSystemAudio}
-              disabled={isRegularRecordingActive || isInstantReplayActiveAndNotSaving || status === 'replay_saving'}
+              disabled={isRegularRecordingActive || isInstantReplayActiveAndNotSaving}
               aria-label="Toggle system audio"
             />
           </div>
@@ -435,7 +405,7 @@ export default function ScreenCatcherClient() {
               id="mic-audio"
               checked={includeMicAudio}
               onCheckedChange={setIncludeMicAudio}
-              disabled={isRegularRecordingActive || isInstantReplayActiveAndNotSaving || status === 'replay_saving'}
+              disabled={isRegularRecordingActive || isInstantReplayActiveAndNotSaving}
               aria-label="Toggle microphone audio"
             />
           </div>
@@ -480,7 +450,7 @@ export default function ScreenCatcherClient() {
                     onClick={handleStartRecording}
                     size="lg"
                     className="w-full bg-primary hover:bg-primary/90 text-primary-foreground transition-all duration-300 ease-in-out transform hover:scale-105"
-                    disabled={isRegularRecordingActive || enableInstantReplay || (status === "permission_pending" && !enableInstantReplay) || status === "replay_saving"}
+                    disabled={isRegularRecordingActive || enableInstantReplay || (status === "permission_pending" && !enableInstantReplay)}
                     aria-label="Start recording"
                     >
                     <Video className="mr-2 h-5 w-5" />
@@ -506,7 +476,7 @@ export default function ScreenCatcherClient() {
                     id="instant-replay-enable"
                     checked={enableInstantReplay}
                     onCheckedChange={handleToggleInstantReplay}
-                    disabled={isRegularRecordingActive || (status === "permission_pending" && !enableInstantReplay) || status === 'replay_saving'}
+                    disabled={isRegularRecordingActive || (status === "permission_pending" && !enableInstantReplay)}
                     aria-label="Toggle Instant Replay"
                 />
             </div>
@@ -519,8 +489,11 @@ export default function ScreenCatcherClient() {
                         </Label>
                         <Select
                             value={String(instantReplayBufferDuration)}
-                            onValueChange={(value) => setInstantReplayBufferDuration(parseInt(value,10))}
-                            disabled={status === "replay_saving" || (status === "permission_pending" && enableInstantReplay)}
+                            onValueChange={(value) => {
+                                const newDuration = parseInt(value,10);
+                                setInstantReplayBufferDuration(newDuration);
+                            }}
+                            disabled={(status === "permission_pending" && enableInstantReplay)}
                         >
                         <SelectTrigger id="replay-duration" aria-label="Select replay clip duration">
                             <SelectValue placeholder="Select duration" />
@@ -546,7 +519,6 @@ export default function ScreenCatcherClient() {
             )}
             <div className="text-sm text-muted-foreground h-5 text-center">
                 {status === "replay_buffering" && `Buffering up to ${instantReplayBufferDurationRef.current/60} min...`}
-                {status === "replay_saving" && `Saving replay...`}
                 {status === "permission_pending" && enableInstantReplay && "Awaiting permission for Instant Replay..."}
             </div>
         </div>
@@ -588,5 +560,4 @@ export default function ScreenCatcherClient() {
     </Card>
   );
 }
-
 

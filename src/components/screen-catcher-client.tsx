@@ -22,6 +22,9 @@ const LIVE_CLIP_DURATIONS = [
   { label: "Last 5 Minutes", value: 300 },
 ];
 
+const REPLAY_CHUNK_DURATION_MS = 5000; // 5 seconds per chunk
+const REPLAY_CHUNK_DURATION_SECONDS = REPLAY_CHUNK_DURATION_MS / 1000;
+
 export default function ScreenCatcherClient() {
   const [status, setStatus] = useState<RecordingStatus>("idle");
   const [includeSystemAudio, setIncludeSystemAudio] = useState(true);
@@ -29,6 +32,10 @@ export default function ScreenCatcherClient() {
   const [recordedVideoUrl, setRecordedVideoUrl] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [numRecordedChunks, setNumRecordedChunks] = useState(0);
+
+  const [enableInstantReplay, setEnableInstantReplay] = useState(false);
+  const [instantReplayBufferDuration, setInstantReplayBufferDuration] = useState(180); // Default to 3 minutes for buffer
+  const instantReplayBufferDurationRef = useRef(instantReplayBufferDuration);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
